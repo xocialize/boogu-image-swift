@@ -285,6 +285,7 @@ case "--e2e-edit":
     let steps = args.count > 6 ? Int(args[6])! : 28
     let size = args.count > 7 ? Int(args[7])! : 512
     let ditDType: DType = (args.count > 8 && args[8] == "fp32") ? .float32 : .bfloat16
+    let editSeed: UInt64 = args.count > 9 ? (UInt64(args[9]) ?? 0) : 0
     runBlocking {
         do {
             guard let img = decodeRGB(inImage) else { err("cannot read \(inImage.path)"); return 3 }
@@ -308,10 +309,36 @@ case "--e2e-edit":
             err("[e2e-edit] cond \(pos.shape) ref \(refLatent.shape)")
             let (px, w, h) = gen.generateEdit(
                 posCond: pos, negCond: neg, refLatent: refLatent, height: size, width: size,
-                steps: steps, textGuidance: 4.0, seed: 0,
+                steps: steps, textGuidance: 4.0, seed: editSeed,
                 progress: { i, n in if i % 5 == 0 || i == n { err("  step \(i)/\(n)") } })
             writePNG(pixels: px, width: w, height: h, to: outURL)
             err("[e2e-edit] wrote \(outURL.path) (\(w)x\(h))")
+            return 0
+        } catch { err("error: \(error)"); return 3 }
+    }
+
+case "--edit-cond-compare":
+    // Compute Swift pos/neg/ref for an image+instruction and compare (shape + cosine + max_abs)
+    // against Python's saved py_cond.safetensors. Localizes which conditioning input diverges.
+    guard args.count >= 6 else { err("--edit-cond-compare <editSnapshot> <qwenDir> <image> <pyCond> <instruction> [size]"); exit(2) }
+    let base = URL(fileURLWithPath: args[1]); let qwenDir = URL(fileURLWithPath: args[2])
+    let inImage = URL(fileURLWithPath: args[3]); let pyPath = args[4]
+    let instruction = args[5]; let size = args.count > 6 ? Int(args[6])! : 384
+    runBlocking {
+        do {
+            let py = try MLX.loadArrays(url: URL(fileURLWithPath: pyPath))
+            guard let img = decodeRGB(inImage) else { err("cannot read image"); return 3 }
+            let encoder = try await BooguPromptEncoder.load(qwenDir: qwenDir, dtype: .float32)
+            let vae = try Device.withDefaultDevice(.cpu) { try BooguWeights.loadVAE(directory: base.appendingPathComponent("vae"), dtype: .float32) }
+            let gen = BooguImageGenerator(dit: try Device.withDefaultDevice(.cpu) { try BooguWeights.loadDiT(directory: base.appendingPathComponent("transformer"), dtype: .float32) }, vae: vae, scheduler: try FlowMatchEulerDiscreteScheduler(directory: base.appendingPathComponent("scheduler")))
+            let pos = try encoder.encodeImage(rgb: img.rgb, width: img.width, height: img.height, instruction: instruction)
+            let neg = try encoder.encodeImage(rgb: img.rgb, width: img.width, height: img.height, instruction: "")
+            let ref = gen.encodeRefLatent(rgb: img.rgb, width: img.width, height: img.height, targetWidth: size, targetHeight: size)
+            for (name, sw) in [("pos", pos), ("neg", neg), ("ref", ref)] {
+                let p = py[name]!.asType(.float32); let s = sw.asType(.float32)
+                err("[\(name)] swift \(s.shape) python \(p.shape)")
+                if s.shape == p.shape { err("    max_abs \(maxAbs(s, p)) cosine \(cosine(s, p))") }
+            }
             return 0
         } catch { err("error: \(error)"); return 3 }
     }
