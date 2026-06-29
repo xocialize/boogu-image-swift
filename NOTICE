@@ -1,0 +1,17 @@
+boogu-image-swift
+Copyright 2026 Xocialize
+
+Swift/MLX port of Boogu-Image-0.1 (Apache-2.0): a Qwen3-VL-8B-conditioned
+OmniGen2-lineage DiT (8 double-stream + 32 single-stream blocks) + FLUX.1
+AutoencoderKL (16-channel) + FlowMatchEuler static-v1 time-shift scheduler.
+Surfaces textToImage (Base / Turbo) and imageEdit (Edit) as one MLXEngine
+ModelPackage.
+
+Reference implementation: the parity-locked Python-MLX port
+xocialize/boogu-image-mlx (Apache-2.0). The Qwen3-VL conditioner is reused from
+the xocialize/qwen3vl-mlx-swift backbone (which itself adapts mlx-swift-lm's
+MLXVLM Qwen3VL, Apache-2.0). The VAE follows diffusers' AutoencoderKL.
+
+Boogu-Image-0.1 model weights: Apache-2.0, published at
+mlx-community/Boogu-Image-0.1-{Base,Turbo,Edit}-* and the conditioner at
+mlx-community/Qwen3-VL-8B-Instruct. This repository contains no model weights.
