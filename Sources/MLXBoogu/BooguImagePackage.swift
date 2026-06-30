@@ -17,7 +17,7 @@ import MLXToolKit
 
 /// Init-time configuration (C9): the variant snapshot (transformer/vae/scheduler), the
 /// Qwen3-VL conditioner snapshot, and generation defaults.
-public struct BooguImageConfiguration: PackageConfiguration, ModelStorable {
+public struct BooguImageConfiguration: PackageConfiguration, ModelStorable, QuantConfigured {
     /// Variant snapshot root with `transformer/`, `vae/`, `scheduler/`.
     public var snapshotPath: String
     /// Stock Qwen3-VL-8B-Instruct snapshot (conditioner + tokenizer).
@@ -87,13 +87,35 @@ public final class BooguImagePackage: ModelPackage {
             provenance: Provenance(
                 sourceRepo: "mlx-community/Boogu-Image-0.1-Base-4bit", revision: "main", tier: 3),
             requirements: RequirementsManifest(
-                // Resident = DiT + Qwen3-VL-8B (bf16) + FLUX VAE at 1024². int4/int8 quantize
-                // only the DiT; the conditioner stays bf16. (Estimates — re-ground via
-                // MemoryProbe in app validation.)
+                // Split footprint (efficiency contract 1.14.0) WITH encoder-evict (per-stage
+                // residency). The Qwen3-VL-8B conditioner (~16 GB bf16) encodes pos/neg ONCE
+                // upfront, then sits idle through the whole DiT denoise + VAE decode — so it is
+                // loaded per request, its conditioning `eval`'d/retained, then EVICTED (`nil` +
+                // Memory.clearCache()) BEFORE the denoise loop. It is a TRANSIENT, not a resident,
+                // on EVERY quant. (Parity-preserved: only WHEN the encoder frees changes; the
+                // last_hidden_state is materialized before the encoder drops.)
+                //   Resident floor (POST-evict) = DiT(quant) + FLUX VAE, resident through denoise.
+                //     int4 quantizes only the DiT; the conditioner is no longer baked in. Old flat
+                //     int4 24 / int8 29 / bf16 36 GB folded the ~16 GB Qwen3-VL into residency →
+                //     post-evict resident ≈ int4 8 / int8 13 / bf16 20 GB.
+                //   activation = max(Qwen3-VL encode transient, DiT denoise working set). The
+                //     encode-phase peak (encoder loaded over DiT+VAE) tends to dominate; declared
+                //     conservatively to cover the encode high-water.
+                // [residentBytes = post-evict DiT+VAE weight floor (solid, quant-scaled).
+                //  peakActivationBytes is FLAGGED smoke/derived — pending an in-app phys RE-BASELINE
+                //  in MLXEngineImage. Known PRE-evict in-app phys was floor 67.4 / peak 70.5 GB (vs
+                //  the 36 GB declared — a ~1.85× gap), so the existing declaration is far off; the
+                //  autorun must re-measure Boogu POST-evict. phys re-baseline pending.]
                 footprints: [
-                    QuantFootprint(quant: .int4, residentBytes: 24_000_000_000),
-                    QuantFootprint(quant: .int8, residentBytes: 29_000_000_000),
-                    QuantFootprint(quant: .bf16, residentBytes: 36_000_000_000),
+                    QuantFootprint(
+                        quant: .int4, residentBytes: 8_000_000_000,
+                        peakActivationBytes: 20_000_000_000),
+                    QuantFootprint(
+                        quant: .int8, residentBytes: 13_000_000_000,
+                        peakActivationBytes: 20_000_000_000),
+                    QuantFootprint(
+                        quant: .bf16, residentBytes: 20_000_000_000,
+                        peakActivationBytes: 20_000_000_000),
                 ],
                 requiredBackends: [.metalGPU],
                 os: OSRequirement(minMacOS: SemanticVersion(major: 26, minor: 0, patch: 0)),
@@ -116,7 +138,11 @@ public final class BooguImagePackage: ModelPackage {
     }
 
     private let configuration: Configuration
-    private var encoder: BooguPromptEncoder?
+    /// Per-stage residency (efficiency contract 1.14.0): the Qwen3-VL-8B conditioner (~16 GB
+    /// bf16) is NOT held resident — it is loaded on demand via this provider, used to encode
+    /// the conditioning, then EVICTED before the DiT denoise peak (see `run(_:)`). Only the
+    /// DiT + FLUX VAE (the `generator`) stay resident.
+    private var encoderProvider: (() async throws -> BooguPromptEncoder)?
     private var generator: BooguImageGenerator?
 
     public nonisolated init(configuration: Configuration) {
@@ -131,9 +157,11 @@ public final class BooguImagePackage: ModelPackage {
             throw BooguImagePackageError.unreadableSnapshot(snapshot.path)
         }
 
-        // Conditioner (Qwen3-VL) + tokenizer.
-        let enc = try await BooguPromptEncoder.load(
-            qwenDir: URL(fileURLWithPath: configuration.qwenPath), dtype: .bfloat16)
+        // Conditioner (Qwen3-VL) + tokenizer: captured as a per-request loader, NOT loaded
+        // resident. Each request loads it, encodes, then evicts it before the denoise loop —
+        // so the ~16 GB conditioner is never co-resident with the DiT denoise activation peak.
+        let qwenDir = URL(fileURLWithPath: configuration.qwenPath)
+        encoderProvider = { try await BooguPromptEncoder.load(qwenDir: qwenDir, dtype: .bfloat16) }
 
         // DiT (quantized if a quant_config.json is present) + VAE + scheduler — loaded on
         // the CPU stream (a multi-GB read on the GPU stream trips the Metal watchdog).
@@ -149,17 +177,17 @@ public final class BooguImagePackage: ModelPackage {
         let scheduler = try FlowMatchEulerDiscreteScheduler(
             directory: snapshot.appendingPathComponent("scheduler"))
 
-        encoder = enc
         generator = BooguImageGenerator(dit: dit, vae: vae, scheduler: scheduler)
     }
 
     public func unload() async {
-        encoder = nil
+        encoderProvider = nil
         generator = nil
+        MLX.Memory.clearCache()  // release the retained MLX pool so eviction frees RSS (not just drop refs)
     }
 
     public func run(_ request: any CapabilityRequest) async throws -> any CapabilityResponse {
-        guard let encoder, let generator else { throw PackageError.notLoaded }
+        guard let encoderProvider, let generator else { throw PackageError.notLoaded }
         try Task.checkCancellation()
 
         switch request.capability {
@@ -169,10 +197,19 @@ public final class BooguImagePackage: ModelPackage {
             }
             let size = t2i.width ?? t2i.height ?? configuration.defaultSize
             let guidance = Float(t2i.guidanceScale ?? configuration.defaultGuidance)
-            let pos = try encoder.encodeText(t2i.prompt).asType(generator.dit.dtype)
+            // PER-STAGE EVICTION: load the Qwen3-VL conditioner, encode pos/neg, force-materialize
+            // the conditioning (`eval`), then drop the encoder + clear the cache BEFORE the denoise
+            // loop so the ~16 GB conditioner is not co-resident with the DiT activation peak. The
+            // `last_hidden_state` tensors are eval'd here, so the math the DiT consumes is identical
+            // (parity-preserved: only WHEN the encoder frees changes).
+            var encoderRef: BooguPromptEncoder? = try await encoderProvider()
+            let pos = try encoderRef!.encodeText(t2i.prompt).asType(generator.dit.dtype)
             let neg = guidance > 1.0
-                ? try encoder.encodeText(t2i.negativePrompt ?? "").asType(generator.dit.dtype)
+                ? try encoderRef!.encodeText(t2i.negativePrompt ?? "").asType(generator.dit.dtype)
                 : nil
+            eval([pos] + (neg.map { [$0] } ?? []))  // materialize off the encoder graph
+            encoderRef = nil                         // release the conditioner (last strong ref)
+            MLX.Memory.clearCache()                  // reclaim the ~16 GB before the denoise peak
             try Task.checkCancellation()
             let (pixels, w, h) = generator.generate(
                 posCond: pos, negCond: neg,
@@ -192,12 +229,19 @@ public final class BooguImagePackage: ModelPackage {
             let th = edit.height ?? configuration.defaultEditSize
             let textG = Float(edit.guidanceScale ?? configuration.defaultEditGuidance)
             // Vision+text conditioning over the input image; ref latent at the target size.
-            let pos = try encoder.encodeImage(
+            // PER-STAGE EVICTION (as T2I): load the Qwen3-VL conditioner, encode pos/neg, eval the
+            // conditioning, then evict the encoder before the ref-latent + denoise (parity-preserved
+            // — only WHEN the encoder frees changes; the VAE ref-latent is on the resident generator).
+            var encoderRef: BooguPromptEncoder? = try await encoderProvider()
+            let pos = try encoderRef!.encodeImage(
                 rgb: input.rgb, width: input.width, height: input.height, instruction: edit.prompt)
                 .asType(generator.dit.dtype)
-            let neg = try encoder.encodeImage(
+            let neg = try encoderRef!.encodeImage(
                 rgb: input.rgb, width: input.width, height: input.height,
                 instruction: edit.negativePrompt ?? "").asType(generator.dit.dtype)
+            eval([pos, neg])         // materialize off the encoder graph
+            encoderRef = nil         // release the conditioner (last strong ref)
+            MLX.Memory.clearCache()  // reclaim the ~16 GB before the ref-latent + denoise peak
             let refLatent = generator.encodeRefLatent(
                 rgb: input.rgb, width: input.width, height: input.height,
                 targetWidth: tw, targetHeight: th)
