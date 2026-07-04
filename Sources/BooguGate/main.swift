@@ -12,7 +12,9 @@ import ImageIO
 import UniformTypeIdentifiers
 import BooguImage
 import MLX
+import MLXBoogu
 import MLXNN
+import MLXToolKit
 
 /// Interleaved RGB8 -> PNG on disk.
 func writePNG(pixels: [UInt8], width: Int, height: Int, to url: URL) {
@@ -307,12 +309,63 @@ case "--e2e-edit":
             let refLatent = gen.encodeRefLatent(rgb: img.rgb, width: img.width, height: img.height,
                                                 targetWidth: size, targetHeight: size)
             err("[e2e-edit] cond \(pos.shape) ref \(refLatent.shape)")
+            // BOOGU_DEBUG: input-tensor health before the denoise (NaN/garbage localization).
+            if ProcessInfo.processInfo.environment["BOOGU_DEBUG"] != nil {
+                for (name, t) in [("pos", pos), ("neg", neg), ("ref", refLatent)] {
+                    let f = t.asType(.float32)
+                    let nan = MLX.isNaN(f).sum().item(Int.self)
+                    let mean = f.mean().item(Float.self)
+                    let mab = abs(f).max().item(Float.self)
+                    err("[e2e-edit] \(name): shape \(t.shape) nan=\(nan) mean=\(mean) max_abs=\(mab)")
+                }
+            }
             let (px, w, h) = gen.generateEdit(
                 posCond: pos, negCond: neg, refLatent: refLatent, height: size, width: size,
                 steps: steps, textGuidance: 4.0, seed: editSeed,
                 progress: { i, n in if i % 5 == 0 || i == n { err("  step \(i)/\(n)") } })
             writePNG(pixels: px, width: w, height: h, to: outURL)
             err("[e2e-edit] wrote \(outURL.path) (\(w)x\(h))")
+            return 0
+        } catch { err("error: \(error)"); return 3 }
+    }
+
+case "--e2e-edit-pkg":
+    // WRAPPER-level live imageEdit: drives BooguImagePackage.run(IEditRequest) — the exact
+    // in-app path (per-request encoder load -> conditioning eval -> encoder EVICT -> ref
+    // latent -> edit denoise). `--e2e-edit` above drives the core directly and bypasses the
+    // wrapper, so the v0.1.2 evict sequence has no live coverage without this mode.
+    guard args.count >= 6 else {
+        err("--e2e-edit-pkg <editSnapshot> <qwenDir> <inImage> <instruction> <out.png> [steps] [size] [seed]")
+        exit(2)
+    }
+    let snapshotPath = args[1]
+    let qwenPath = args[2]
+    let inImage = URL(fileURLWithPath: args[3])
+    let instruction = args[4]
+    let outURL = URL(fileURLWithPath: args[5])
+    let steps = args.count > 6 ? Int(args[6])! : 28
+    let size = args.count > 7 ? Int(args[7])! : 512
+    let editSeed: UInt64 = args.count > 8 ? (UInt64(args[8]) ?? 0) : 0
+    runBlocking {
+        do {
+            guard let data = try? Data(contentsOf: inImage), let img = decodeRGB(inImage) else {
+                err("cannot read \(inImage.path)"); return 3
+            }
+            // Mirror the in-app registration: bf16 snapshot + fp32 DiT (the >=384² edit NaN guard).
+            let cfg = BooguImageConfiguration(
+                snapshotPath: snapshotPath, qwenPath: qwenPath, quant: .bf16, useFP32DiT: true,
+                defaultEditSteps: steps, defaultEditSize: size)
+            let pkg = BooguImagePackage(configuration: cfg)
+            try await pkg.load()
+            let req = IEditRequest(
+                images: [Image(format: .png, data: data, width: img.width, height: img.height)],
+                prompt: instruction, width: size, height: size, steps: steps, seed: editSeed)
+            err("[e2e-edit-pkg] loaded; running IEditRequest \(size)x\(size) steps=\(steps) seed=\(editSeed)")
+            guard let resp = try await pkg.run(req) as? IEditResponse else {
+                err("unexpected response type"); return 3
+            }
+            try resp.image.data.write(to: outURL)
+            err("[e2e-edit-pkg] wrote \(outURL.path)")
             return 0
         } catch { err("error: \(error)"); return 3 }
     }

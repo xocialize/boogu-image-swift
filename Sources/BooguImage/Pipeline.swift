@@ -66,6 +66,12 @@ public final class BooguImageGenerator {
             }
             latent = scheduler.step(pred, stepIndex: i, sample: latent)
             eval(latent)
+            if ProcessInfo.processInfo.environment["BOOGU_DEBUG"] != nil {
+                let lf = latent.asType(.float32)
+                let msg = "step \(i) t=\(scheduler.timesteps[i]) nan=\(MLX.isNaN(lf).sum().item(Int.self)) "
+                    + "mean=\(lf.mean().item(Float.self)) max_abs=\(abs(lf).max().item(Float.self))\n"
+                FileHandle.standardError.write(Data(msg.utf8))
+            }
             MLX.GPU.clearCache()
             progress?(i + 1, steps)
         }

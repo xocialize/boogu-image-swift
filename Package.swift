@@ -57,7 +57,13 @@ let package = Package(
         // is unreliable, so every Metal-touching gate is a `swift run` mode here.
         .executableTarget(
             name: "BooguGate",
-            dependencies: ["BooguImage"],
+            dependencies: [
+                "BooguImage",
+                // Wrapper-level gate (--e2e-edit-pkg): drives BooguImagePackage.run, the
+                // in-app path the core gates bypass (per-request encoder load/evict).
+                "MLXBoogu",
+                .product(name: "MLXToolKit", package: "mlx-engine-swift"),
+            ],
             path: "Sources/BooguGate"
         ),
         .testTarget(
