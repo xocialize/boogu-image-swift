@@ -23,7 +23,7 @@ let package = Package(
         .package(url: "https://github.com/ml-explore/mlx-swift-lm.git", from: "3.31.3"),
         .package(url: "https://github.com/huggingface/swift-transformers", from: "1.3.3"),
         // Reusable Qwen3-VL backbone exposing last_hidden_state (the conditioner).
-        .package(url: "https://github.com/xocialize/qwen3vl-mlx-swift", from: "0.1.1"),
+        .package(url: "https://github.com/xocialize/qwen3vl-mlx-swift", from: "0.1.2"),
         // MLXEngine contract (MLXToolKit) for the wrapper target only.
         // Floor 0.17.0: the split-footprint/QuantConfigured efficiency contract this package adopts.
         .package(url: "https://github.com/xocialize/mlx-engine-swift", from: "0.17.0"),

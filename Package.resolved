@@ -1,5 +1,5 @@
 {
-  "originHash" : "09c08041e8840b09a842f067f5e970860e173ae41acfc90c831db0a69c65bad2",
+  "originHash" : "79b1164a1998ef5d902d7445e01c9be9b58a7d8effa768127a1e38bed13d1fc2",
   "pins" : [
     {
       "identity" : "eventsource",
@@ -42,8 +42,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/xocialize/qwen3vl-mlx-swift",
       "state" : {
-        "revision" : "33baf9cc9e11e9a51b49c833fec04ef54f5424c9",
-        "version" : "0.1.1"
+        "revision" : "b69d1aa110b9b857e10917e28daad9101c2f6ef5",
+        "version" : "0.1.2"
       }
     },
     {
