@@ -187,8 +187,12 @@ public final class BooguImagePackage: ModelPackage {
     }
 
     public func run(_ request: any CapabilityRequest) async throws -> any CapabilityResponse {
-        guard let encoderProvider, let generator else { throw PackageError.notLoaded }
+        // CAN-1: the entry checkpoint is the FIRST act of run() — before notLoaded validation
+        // (engine ≥ 0.27.0). Mid-run cadence: post-encode-evict checkpoints below, per-denoise-
+        // step `Task.isCancelled` break in BooguImageGenerator.denoise (cancelled-task decode
+        // skip), and the post-generate checkpoints rethrow CancellationError unchanged.
         try Task.checkCancellation()
+        guard let encoderProvider, let generator else { throw PackageError.notLoaded }
 
         switch request.capability {
         case .textToImage:

@@ -56,6 +56,9 @@ public final class BooguImageGenerator {
         var latent = MLXRandom.normal([1, 16, hl, wl], key: MLXRandom.key(seed)).asType(dtype)
 
         for i in 0..<steps {
+            // Cooperative cancellation: bail per denoise step (non-throwing core API — the
+            // MLXBoogu wrapper's post-call `try Task.checkCancellation()` rethrows).
+            if Task.isCancelled { break }
             let t = MLXArray([scheduler.timesteps[i]]).asType(dtype)
             var pred = dit(latent: latent, timestep: t, instructionHiddenStates: posCond,
                            refLatent: refLatent)
@@ -75,6 +78,9 @@ public final class BooguImageGenerator {
             MLX.GPU.clearCache()
             progress?(i + 1, steps)
         }
+        // A cancelled task skips the monolithic VAE decode (pre-decode seam); callers on a
+        // cancelled task never consume the pixels (the wrapper's checkpoint rethrows first).
+        if Task.isCancelled { return ([], width, height) }
         return decodeToRGB(latent, height: height, width: width)
     }
 
