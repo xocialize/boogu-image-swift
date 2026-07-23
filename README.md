@@ -67,5 +67,8 @@ the FFN down-projection (K=13568, N=3360), corrupting at M ∈ [1249, 4522] toke
 is row-chunked at ≤896 rows in `LuminaFeedForward.downProjected` (mathematically
 exact), so the DiT default is bf16. Env switches: `BOOGU_FP32` forces the fp32 DiT,
 `BOOGU_NO_CHUNK` disables the chunk (only for validating a fixed mlx-swift).
+If a bf16 render ever looks suspect (in-app or CLI), set `BOOGU_FP32=1` in the run
+environment for an instant A/B against the fp32 path — same seed, same request; if
+the artifact survives fp32 it is not this bug.
 **On every mlx-swift bump:** run `swift run BooguGate --nax-probe`; on PASS delete
 `downProjected` (and its siblings in mage-flow-swift + qwen3vl-mlx-swift).
