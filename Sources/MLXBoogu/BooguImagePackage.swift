@@ -23,7 +23,11 @@ public struct BooguImageConfiguration: PackageConfiguration, ModelStorable, Quan
     /// Stock Qwen3-VL-8B-Instruct snapshot (conditioner + tokenizer).
     public var qwenPath: String
     public var quant: Quant
-    /// Run the DiT forward in fp32 (avoids the bf16 large-seqLen NaN at >=512²).
+    /// Run the DiT forward in fp32. No longer needed for correctness: the old "bf16
+    /// large-seqLen NaN" was the mlx-swift NAX split-K GEMM bug (ml-explore/mlx#3810),
+    /// now worked around exactly by row-chunking the FFN down-projection
+    /// (`LuminaFeedForward.downProjected`) — bf16 runs clean and ~2× faster than fp32.
+    /// Kept for parity work; the `BOOGU_FP32` env var forces it on at load time.
     public var useFP32DiT: Bool
     public var defaultSteps: Int
     public var defaultGuidance: Double
@@ -167,9 +171,13 @@ public final class BooguImagePackage: ModelPackage {
         // the CPU stream (a multi-GB read on the GPU stream trips the Metal watchdog).
         var dit: BooguImageTransformer2DModel!
         var vae: AutoencoderKL!
+        // BOOGU_FP32 escape hatch: force the fp32 DiT regardless of configuration
+        // (mirrors MAGEFLOW_FP32 — for parity work / bisecting a suspect bf16 render).
+        let fp32 = configuration.useFP32DiT
+            || ProcessInfo.processInfo.environment["BOOGU_FP32"] != nil
         try Device.withDefaultDevice(.cpu) {
             dit = try BooguWeights.loadDiTAuto(
-                transformerDir: transformerDir, fp32: configuration.useFP32DiT)
+                transformerDir: transformerDir, fp32: fp32)
             eval(dit)
             vae = try BooguWeights.loadVAE(
                 directory: snapshot.appendingPathComponent("vae"), dtype: .float32)

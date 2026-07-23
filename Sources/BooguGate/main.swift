@@ -96,6 +96,41 @@ guard let gate = args.first else {
 }
 
 switch gate {
+case "--nax-probe":
+    // Weights-free probe for the mlx-swift NAX split-K GEMM bug (ml-explore/mlx#3797,
+    // fixed by mlx#3810): raw bf16 matmul at Boogu's FFN down-projection shape
+    // (K=13568, N=3360) across the dispatch window M ∈ [1249, 4522], vs an fp32
+    // reference. Run on every mlx-swift bump; on PASS the row-chunk in
+    // `LuminaFeedForward.downProjected` is removable. Thresholds are STRICT on
+    // purpose — corruption just past the boundary is subtle (cos ~0.998 still FAILS
+    // a loose ≥0.99 gate check, and is still garbage).
+    var lcg: UInt64 = 0x9E37_79B9_7F4A_7C15
+    func rand(_ n: Int) -> [Float] {
+        (0 ..< n).map { _ in
+            lcg = lcg &* 6_364_136_223_846_793_005 &+ 1_442_695_040_888_963_407
+            return Float(Int64(bitPattern: lcg >> 11)) / Float(Int64.max >> 11)
+        }
+    }
+    let (K, N) = (13568, 3360)  // Boogu DiT LuminaFeedForward.linear2
+    let b = MLXArray(rand(N * K), [N, K]).asType(.bfloat16)
+    var ok = true
+    // 896 = chunk size (below window); 1249 = first qualifying M; 2304 = 768² refiner;
+    // 4096 = 1024² refiner; 4522 = last qualifying M (K ≥ 3·M fails at 4523).
+    for m in [512, 896, 1249, 2048, 2304, 4096, 4522] {
+        let a = MLXArray(rand(m * K), [m, K]).asType(.bfloat16)
+        let y = matmul(a, b.T)
+        let yRef = matmul(a.asType(.float32), b.asType(.float32).T)
+        eval(y, yRef)
+        let mab = abs(y.asType(.float32) - yRef).max().item(Float.self)
+        let c = cosine(y, yRef)
+        let pass = c > 0.999 && mab.isFinite && mab < 100
+        if !pass { ok = false }
+        err(String(format: "  M=%d K=%d N=%d bf16: cos %.8f max_abs %.3e  %@",
+                   m, K, N, c, mab, (pass ? "OK" : "BROKEN") as NSString))
+    }
+    err("[nax-probe] \(ok ? "PASS — kernel fixed, row-chunk removable" : "FAIL — keep the row-chunk")")
+    exit(ok ? 0 : 1)
+
 case "--s0-keys":
     guard args.count >= 3 else { err("--s0-keys <baseDir> <fixturesDir>"); exit(2) }
     let base = URL(fileURLWithPath: args[1])
@@ -351,9 +386,11 @@ case "--e2e-edit-pkg":
             guard let data = try? Data(contentsOf: inImage), let img = decodeRGB(inImage) else {
                 err("cannot read \(inImage.path)"); return 3
             }
-            // Mirror the in-app registration: bf16 snapshot + fp32 DiT (the >=384² edit NaN guard).
+            // Mirror the in-app registration: bf16 snapshot + bf16 DiT. The old fp32-DiT
+            // guard (>=384² edit NaN) is superseded by the row-chunked down-projection
+            // (`LuminaFeedForward.downProjected`); BOOGU_FP32 forces fp32 for parity work.
             let cfg = BooguImageConfiguration(
-                snapshotPath: snapshotPath, qwenPath: qwenPath, quant: .bf16, useFP32DiT: true,
+                snapshotPath: snapshotPath, qwenPath: qwenPath, quant: .bf16, useFP32DiT: false,
                 defaultEditSteps: steps, defaultEditSize: size)
             let pkg = BooguImagePackage(configuration: cfg)
             try await pkg.load()

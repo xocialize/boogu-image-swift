@@ -44,6 +44,7 @@ is unreliable). Parity goldens (`fixtures/goldens/`) are gitignored — regenera
 from the Python-MLX oracle with `tools/dump_goldens.py`.
 
 ```
+swift run BooguGate --nax-probe                              # mlx-swift NAX split-K GEMM health (no weights)
 swift run BooguGate --s0-keys   <baseDir> fixtures           # structural key contract (no weights)
 swift run BooguGate --s1-vae    <baseDir> fixtures/goldens   # VAE decode/encode parity
 swift run BooguGate --s1-sched  <baseDir> fixtures/goldens   # scheduler parity
@@ -56,3 +57,15 @@ swift run BooguGate --e2e-edit  <editDir> <qwenDir> in.png "<instruction>" out.p
 
 Weights: `mlx-community/Boogu-Image-0.1-{Base,Turbo,Edit}` (transformer / vae / scheduler)
 + the stock `mlx-community/Qwen3-VL-8B-Instruct` conditioner. This repo contains no weights.
+
+### mlx-swift NAX split-K workaround (temporary)
+
+mlx-swift ≤0.31.6 JIT-compiles `steel_gemm_splitk_axpby_nax` with the wrong dtype
+template parameter (ml-explore/mlx#3797, fixed upstream by mlx#3810 on 2026-07-07 —
+no mlx-swift release ships it yet). The only Boogu DiT GEMM in the dispatch window is
+the FFN down-projection (K=13568, N=3360), corrupting at M ∈ [1249, 4522] tokens; it
+is row-chunked at ≤896 rows in `LuminaFeedForward.downProjected` (mathematically
+exact), so the DiT default is bf16. Env switches: `BOOGU_FP32` forces the fp32 DiT,
+`BOOGU_NO_CHUNK` disables the chunk (only for validating a fixed mlx-swift).
+**On every mlx-swift bump:** run `swift run BooguGate --nax-probe`; on PASS delete
+`downProjected` (and its siblings in mage-flow-swift + qwen3vl-mlx-swift).
