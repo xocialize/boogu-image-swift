@@ -69,7 +69,12 @@ let package = Package(
         ),
         .testTarget(
             name: "BooguImageTests",
-            dependencies: ["BooguImage"],
+            dependencies: [
+                "BooguImage",
+                .product(name: "MLX", package: "mlx-swift"),
+                .product(name: "MLXNN", package: "mlx-swift"),
+                .product(name: "MLXRandom", package: "mlx-swift"),
+            ],
             path: "Tests/BooguImageTests"
         ),
         .testTarget(

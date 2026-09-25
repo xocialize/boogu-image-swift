@@ -27,10 +27,10 @@ final class ResnetBlock2D: Module {
 
     init(_ inC: Int, _ outC: Int, groups: Int = 32, eps: Float = 1e-6) {
         self._norm1.wrappedValue = groupNorm(groups, inC, eps)
-        self._conv1.wrappedValue = Conv2d(
+        self._conv1.wrappedValue = WinogradFreeConv2d(
             inputChannels: inC, outputChannels: outC, kernelSize: 3, stride: 1, padding: 1)
         self._norm2.wrappedValue = groupNorm(groups, outC, eps)
-        self._conv2.wrappedValue = Conv2d(
+        self._conv2.wrappedValue = WinogradFreeConv2d(
             inputChannels: outC, outputChannels: outC, kernelSize: 3, stride: 1, padding: 1)
         if inC != outC {
             self._convShortcut.wrappedValue = Conv2d(
@@ -70,7 +70,7 @@ final class Upsample2D: Module {
     @ModuleInfo var conv: Conv2d
 
     init(_ channels: Int) {
-        self._conv.wrappedValue = Conv2d(
+        self._conv.wrappedValue = WinogradFreeConv2d(
             inputChannels: channels, outputChannels: channels, kernelSize: 3, stride: 1, padding: 1)
         super.init()
     }
@@ -185,7 +185,7 @@ final class VAEEncoder: Module {
 
     init(_ inC: Int, _ latentC: Int, _ blockOut: [Int], layersPerBlock: Int,
          groups: Int = 32, eps: Float = 1e-6) {
-        self._convIn.wrappedValue = Conv2d(
+        self._convIn.wrappedValue = WinogradFreeConv2d(
             inputChannels: inC, outputChannels: blockOut[0], kernelSize: 3, stride: 1, padding: 1)
         var blocks: [DownEncoderBlock2D] = []
         var outputChannel = blockOut[0]
@@ -199,7 +199,7 @@ final class VAEEncoder: Module {
         self._downBlocks.wrappedValue = blocks
         self._midBlock.wrappedValue = UNetMidBlock2D(blockOut[blockOut.count - 1], groups: groups, eps: eps)
         self._convNormOut.wrappedValue = groupNorm(groups, blockOut[blockOut.count - 1], eps)
-        self._convOut.wrappedValue = Conv2d(
+        self._convOut.wrappedValue = WinogradFreeConv2d(
             inputChannels: blockOut[blockOut.count - 1], outputChannels: 2 * latentC,
             kernelSize: 3, stride: 1, padding: 1)
         super.init()
@@ -223,7 +223,7 @@ final class VAEDecoder: Module {
     init(_ outC: Int, _ latentC: Int, _ blockOut: [Int], layersPerBlock: Int,
          groups: Int = 32, eps: Float = 1e-6) {
         let reversed = Array(blockOut.reversed())
-        self._convIn.wrappedValue = Conv2d(
+        self._convIn.wrappedValue = WinogradFreeConv2d(
             inputChannels: latentC, outputChannels: reversed[0], kernelSize: 3, stride: 1, padding: 1)
         self._midBlock.wrappedValue = UNetMidBlock2D(reversed[0], groups: groups, eps: eps)
         var blocks: [UpDecoderBlock2D] = []
@@ -237,7 +237,7 @@ final class VAEDecoder: Module {
         }
         self._upBlocks.wrappedValue = blocks
         self._convNormOut.wrappedValue = groupNorm(groups, reversed[reversed.count - 1], eps)
-        self._convOut.wrappedValue = Conv2d(
+        self._convOut.wrappedValue = WinogradFreeConv2d(
             inputChannels: reversed[reversed.count - 1], outputChannels: outC,
             kernelSize: 3, stride: 1, padding: 1)
         super.init()
@@ -271,6 +271,33 @@ public final class AutoencoderKL: Module {
             cfg.outChannels, cfg.latentChannels, cfg.blockOutChannels,
             layersPerBlock: cfg.layersPerBlock, groups: cfg.normNumGroups, eps: eps)
         super.init()
+        decoderConvRoute = .winograd
+        if let route = BooguVAEConvRoute.environmentOverride {
+            encoderConvRoute = route
+            decoderConvRoute = route
+        }
+    }
+
+    /// Route for the encoder's in-window 3×3 convs (WinogradFreeConv2d.swift). Default `.conv3d`:
+    /// the raw Winograd loss in the edit-reference latent is material.
+    public var encoderConvRoute: BooguVAEConvRoute {
+        get { Self.route(of: encoder) }
+        set { Self.setRoute(newValue, in: encoder) }
+    }
+
+    /// Route for the decoder's in-window 3×3 convs. Default `.winograd`: its fp32 loss is below
+    /// 8-bit visibility and `.conv3d` costs ~+0.4 s per 1024² decode — parity lanes opt in.
+    public var decoderConvRoute: BooguVAEConvRoute {
+        get { Self.route(of: decoder) }
+        set { Self.setRoute(newValue, in: decoder) }
+    }
+
+    static func route(of m: Module) -> BooguVAEConvRoute {
+        m.modules().lazy.compactMap { ($0 as? WinogradFreeConv2d)?.route }.first ?? .winograd
+    }
+
+    static func setRoute(_ route: BooguVAEConvRoute, in m: Module) {
+        for case let conv as WinogradFreeConv2d in m.modules() { conv.route = route }
     }
 
     /// Raw moments (mean, logvar concatenated on channel), NCHW in / NCHW out.

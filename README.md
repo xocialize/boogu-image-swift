@@ -72,3 +72,48 @@ environment for an instant A/B against the fp32 path — same seed, same request
 the artifact survives fp32 it is not this bug.
 **On every mlx-swift bump:** run `swift run BooguGate --nax-probe`; on PASS delete
 `downProjected` (and its siblings in mage-flow-swift + qwen3vl-mlx-swift).
+
+### VAE: mlx's lossy Winograd conv2d window (2026-09-24)
+
+mlx's Metal `conv2d` takes a Winograd F(6×6,3×3) path when the conv is 3×3, stride 1, dilation 1,
+groups 1, C % 32 == 0, O % 32 == 0, C + O ≥ 256 and N·H·W ≥ 4096. On M5 that path loses about
+6.4e-3 relL2 per conv in fp32, because its inner GEMM runs TF32, and about 5.8e-2 in bf16.
+
+The FLUX.1 AE hits it in nearly every 3×3 conv: 31 decoder convs at 1024² and 21 encoder convs per
+edit reference. `--s1-vae` runs on the CPU lane, so this was never visible there.
+
+Every stride-1 3×3 conv is now a `WinogradFreeConv2d` with a route (`BooguVAEConvRoute`). Shapes
+outside the window take plain conv2d.
+
+**Defaults: encoder `.conv3d`, decoder `.winograd`.** The choice follows the fleet audit decision
+of 2026-09-24:
+
+- Route where the loss is material. The encoder loss is: 2.2e-2 in the edit-reference latent.
+- Keep mlx's path where the fp32 loss is below 8-bit visibility and the route is expensive. That is
+  the decoder.
+
+Measurements: DIV2K photo, against the CPU lane. Identical to z-image-swift, which uses the same
+FLUX.1-dev AE.
+
+| | Raw conv2d (Winograd) | conv3d route |
+|---|---|---|
+| Encode latent, 512² / 1024² | 1.7e-2 / 2.2e-2 | 6.5e-5 / 3.7e-4 (see note) |
+| Decode, fp32, 1024² | 1.3e-3 · 70.0 dB · max 1.35e-2 | 2.0e-5 · 106.5 dB |
+| Decode, bf16, 1024² | 1.2e-2 · 50.8 dB | 3.8e-3 · 60.8 dB |
+| Time at 1024², decode / encode (fp32) | ~597 ms / ~330 ms | +471 ms / +212 ms |
+
+Note on the 1024² encode figure: most of the 3.7e-4 is error in the CPU reference. MLX's CPU
+GroupNorm drifts with group size, to 8e-5 per full-resolution norm at 1024² against float64.
+
+Controls:
+
+- Parity lanes: set `vae.decoderConvRoute = .conv3d`, or run with `MLX_ENABLE_TF32=0`, which makes
+  fp32 Winograd exact at full speed.
+- Environment override: `BOOGU_VAE_CONV_ROUTE=winograd|conv3d|fp32Winograd`.
+
+Tests:
+
+- `swift test --filter WinogradProbeTests` is weight-free. It is the removal signal on an mlx-swift
+  bump.
+- `BOOGU_PARITY=1 BOOGU_SNAPSHOT=<Boogu-Image-0.1-Edit> swift test -c release -Xswiftc
+  -enable-testing --filter VAEGPULaneTests` compares the GPU and CPU lanes.
