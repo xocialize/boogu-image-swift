@@ -28,11 +28,13 @@ let package = Package(
         // Floor 0.27.0: the CAN cancellation gate (MLXServeConformance.CancellationConformance)
         // on top of the 0.17.0 split-footprint/QuantConfigured efficiency contract.
         .package(url: "https://github.com/xocialize/mlx-engine-swift", from: "0.27.0"),
+        .package(url: "https://github.com/xocialize/mlx-exact-conv-swift", from: "0.1.0"),
     ],
     targets: [
         .target(
             name: "BooguImage",
             dependencies: [
+                .product(name: "MLXExactConv", package: "mlx-exact-conv-swift"),
                 .product(name: "MLX", package: "mlx-swift"),
                 .product(name: "MLXNN", package: "mlx-swift"),
                 .product(name: "MLXFast", package: "mlx-swift"),
