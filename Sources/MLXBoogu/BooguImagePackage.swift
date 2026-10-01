@@ -24,9 +24,8 @@ public struct BooguImageConfiguration: PackageConfiguration, ModelStorable, Quan
     public var qwenPath: String
     public var quant: Quant
     /// Run the DiT forward in fp32. No longer needed for correctness: the old "bf16
-    /// large-seqLen NaN" was the mlx-swift NAX split-K GEMM bug (ml-explore/mlx#3810),
-    /// now worked around exactly by row-chunking the FFN down-projection
-    /// (`LuminaFeedForward.downProjected`) — bf16 runs clean and ~2× faster than fp32.
+    /// large-seqLen NaN" was the mlx-swift NAX split-K GEMM bug (ml-explore/mlx#3797),
+    /// fixed in mlx-swift 0.32.3 (the manifest floor) — bf16 runs clean and ~2× faster than fp32.
     /// Kept for parity work; the `BOOGU_FP32` env var forces it on at load time.
     public var useFP32DiT: Bool
     public var defaultSteps: Int

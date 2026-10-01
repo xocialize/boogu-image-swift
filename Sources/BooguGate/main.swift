@@ -100,8 +100,8 @@ case "--nax-probe":
     // Weights-free probe for the mlx-swift NAX split-K GEMM bug (ml-explore/mlx#3797,
     // fixed by mlx#3810): raw bf16 matmul at Boogu's FFN down-projection shape
     // (K=13568, N=3360) across the dispatch window M ∈ [1249, 4522], vs an fp32
-    // reference. Run on every mlx-swift bump; on PASS the row-chunk in
-    // `LuminaFeedForward.downProjected` is removable. Thresholds are STRICT on
+    // reference. A regression guard since the row-chunk was removed (mlx-swift 0.32.3):
+    // run it on every mlx-swift bump. Thresholds are STRICT on
     // purpose — corruption just past the boundary is subtle (cos ~0.998 still FAILS
     // a loose ≥0.99 gate check, and is still garbage).
     var lcg: UInt64 = 0x9E37_79B9_7F4A_7C15
@@ -128,7 +128,7 @@ case "--nax-probe":
         err(String(format: "  M=%d K=%d N=%d bf16: cos %.8f max_abs %.3e  %@",
                    m, K, N, c, mab, (pass ? "OK" : "BROKEN") as NSString))
     }
-    err("[nax-probe] \(ok ? "PASS — kernel fixed, row-chunk removable" : "FAIL — keep the row-chunk")")
+    err("[nax-probe] \(ok ? "PASS — split-K GEMM clean" : "FAIL — NAX split-K regression (mlx#3797): bf16 DiT renders will corrupt")")
     exit(ok ? 0 : 1)
 
 case "--s0-keys":
@@ -387,8 +387,8 @@ case "--e2e-edit-pkg":
                 err("cannot read \(inImage.path)"); return 3
             }
             // Mirror the in-app registration: bf16 snapshot + bf16 DiT. The old fp32-DiT
-            // guard (>=384² edit NaN) is superseded by the row-chunked down-projection
-            // (`LuminaFeedForward.downProjected`); BOOGU_FP32 forces fp32 for parity work.
+            // guard (>=384² edit NaN) is gone: the NAX split-K GEMM bug behind it is fixed in
+            // mlx-swift 0.32.3. BOOGU_FP32 forces fp32 for parity work.
             let cfg = BooguImageConfiguration(
                 snapshotPath: snapshotPath, qwenPath: qwenPath, quant: .bf16, useFP32DiT: false,
                 defaultEditSteps: steps, defaultEditSize: size)

@@ -135,38 +135,7 @@ final class LuminaFeedForward: Module {
     }
 
     func callAsFunction(_ x: MLXArray) -> MLXArray {
-        downProjected(silu(linear1(x)) * linear3(x))
-    }
-
-    /// mlx-swift ≤0.31.6 JIT-compiles `steel_gemm_splitk_axpby_nax` (dispatched at
-    /// half precision, M·N ≥ 2048², K ≥ 10240, K ≥ 3·max(M,N)) with the wrong dtype
-    /// template parameter, so the kernel reads bf16 inputs as fp32 → garbage/NaN.
-    /// This down-projection (K=13568, N=3360) is the only Boogu DiT GEMM in the
-    /// window: it corrupts at M ∈ [1249, 4522] tokens — a 384² edit packs
-    /// 2·576 + caption ≥ 1249, which is exactly the old "bf16 DiT NaNs ≥384² on the
-    /// edit path". QKV/attn-out/gate-up (K ≤ 4096) never qualify. Chunk rows below
-    /// the threshold: output rows are independent, so this is mathematically exact.
-    /// Same workaround as mage-flow-swift `MageFeedForward.downProjected` and
-    /// qwen3vl-mlx-swift `MLP.downProjected`. Fixed upstream in ml-explore/mlx#3810
-    /// (2026-07-07); remove once an mlx-swift release vendors mlx ≥ a8c3e9c —
-    /// verify first with `BooguGate --nax-probe` (strict: cos > 0.999 AND max_abs < 100).
-    func downProjected(_ x: MLXArray) -> MLXArray {
-        // BOOGU_NO_CHUNK disables the workaround — for validating a fixed
-        // mlx-swift (run `BooguGate --nax-probe` first).
-        if ProcessInfo.processInfo.environment["BOOGU_NO_CHUNK"] != nil { return linear2(x) }
-        let tokens = x.dim(-2)
-        let rowLimit = 896
-        guard x.dtype != .float32, !(linear2 is QuantizedLinear), tokens > rowLimit else {
-            return linear2(x)
-        }
-        var parts: [MLXArray] = []
-        var start = 0
-        while start < tokens {
-            let end = min(start + rowLimit, tokens)
-            parts.append(linear2(x[.ellipsis, start ..< end, 0...]))
-            start = end
-        }
-        return concatenated(parts, axis: -2)
+        linear2(silu(linear1(x)) * linear3(x))
     }
 }
 

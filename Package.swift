@@ -19,11 +19,13 @@ let package = Package(
         .library(name: "MLXBoogu", targets: ["MLXBoogu"]),
     ],
     dependencies: [
-        .package(url: "https://github.com/ml-explore/mlx-swift.git", from: "0.31.4"),
-        .package(url: "https://github.com/ml-explore/mlx-swift-lm.git", from: "3.31.3"),
+        // 0.32.3 carries the NAX split-K GEMM fix (mlx#3810); the FFN row-chunk was removed on that
+        // basis, so older versions would corrupt bf16 renders at 1249–4522 tokens.
+        .package(url: "https://github.com/ml-explore/mlx-swift.git", from: "0.32.3"),
+        .package(url: "https://github.com/ml-explore/mlx-swift-lm.git", from: "3.32.3"),
         .package(url: "https://github.com/huggingface/swift-transformers", from: "1.3.3"),
         // Reusable Qwen3-VL backbone exposing last_hidden_state (the conditioner).
-        .package(url: "https://github.com/xocialize/qwen3vl-mlx-swift", from: "0.1.2"),
+        .package(url: "https://github.com/xocialize/qwen3vl-mlx-swift", from: "0.4.0"),
         // MLXEngine contract (MLXToolKit) for the wrapper target only.
         // Floor 0.27.0: the CAN cancellation gate (MLXServeConformance.CancellationConformance)
         // on top of the 0.17.0 split-footprint/QuantConfigured efficiency contract.
