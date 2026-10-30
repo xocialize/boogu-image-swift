@@ -27,10 +27,12 @@ let package = Package(
         // Reusable Qwen3-VL backbone exposing last_hidden_state (the conditioner).
         .package(url: "https://github.com/xocialize/qwen3vl-mlx-swift", from: "0.4.0"),
         // MLXEngine contract (MLXToolKit) for the wrapper target only.
-        // Floor 0.27.0: the CAN cancellation gate (MLXServeConformance.CancellationConformance)
-        // on top of the 0.17.0 split-footprint/QuantConfigured efficiency contract.
-        .package(url: "https://github.com/xocialize/mlx-engine-swift", from: "0.27.0"),
-        .package(url: "https://github.com/xocialize/mlx-exact-conv-swift", from: "0.1.0"),
+        // Floor 0.56.0 (contract 1.42.0): per-run reserves from the manifest's outputPixels activation
+        // line (WorkloadDeclaring), on top of WeightSourcing's store probe (0.32.0), the CAN gate (0.27.0)
+        // and the split-footprint/QuantConfigured contract (0.17.0).
+        .package(url: "https://github.com/xocialize/mlx-engine-swift", from: "0.56.0"),
+        // 0.1.1 keeps convs off mlx 0.32's channel-pad helpers, which free their fill too early (AB-L-0243).
+        .package(url: "https://github.com/xocialize/mlx-exact-conv-swift", from: "0.1.1"),
     ],
     targets: [
         .target(

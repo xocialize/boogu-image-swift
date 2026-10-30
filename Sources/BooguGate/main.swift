@@ -407,6 +407,97 @@ case "--e2e-edit-pkg":
         } catch { err("error: \(error)"); return 3 }
     }
 
+case "--pkg-measure":
+    // WRAPPER-level footprint measurement: drives BooguImagePackage.load() + run() as a Gaea worker
+    // does, with the MLX pool capped at 2 GiB (the engine's automatic rule, min(2 GB, 5% of budget)).
+    // resident = phys_footprint after load(); peak = the highest phys_footprint sampled (20 ms) during
+    // run(), or the kernel's lifetime phys peak when higher; activation = peak − resident. MLX active/peak
+    // are printed beside them. The PNG's pixel
+    // spread catches a NaN render (a NaN latent decodes to one flat colour).
+    guard args.count >= 9 else {
+        err("--pkg-measure <snapshot> <qwenDir> <int4|int8|bf16> <t2i|edit> <W> <H> <steps> <out.png> [inImage] [guidance]")
+        exit(2)
+    }
+    let snapshotPath = args[1], qwenPath = args[2]
+    let quant = Quant(rawValue: args[3]) ?? .bf16
+    let isEdit = args[4] == "edit"
+    let (mw, mh, mSteps) = (Int(args[5])!, Int(args[6])!, Int(args[7])!)
+    let outURL = URL(fileURLWithPath: args[8])
+    let inImage = args.count > 9 && isEdit ? URL(fileURLWithPath: args[9]) : nil
+    let mGuidance = args.count > (isEdit ? 10 : 9) ? Double(args[isEdit ? 10 : 9]) : nil
+    Memory.cacheLimit = 2 << 30
+    runBlocking {
+        func phys() -> UInt64 {
+            var info = task_vm_info_data_t()
+            var count = mach_msg_type_number_t(MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<integer_t>.size)
+            let kr = withUnsafeMutablePointer(to: &info) {
+                $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+                    task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), $0, &count)
+                }
+            }
+            return kr == KERN_SUCCESS ? info.phys_footprint : 0
+        }
+        final class Peak: @unchecked Sendable { var value: UInt64 = 0; var running = true }
+        let gb = { (b: UInt64) in String(format: "%.2f", Double(b) / 1e9) }
+        do {
+            let cfg = BooguImageConfiguration(snapshotPath: snapshotPath, qwenPath: qwenPath, quant: quant)
+            let pkg = BooguImagePackage(configuration: cfg)
+            let t0 = Date()
+            try await pkg.load()
+            Memory.clearCache()
+            let resident = phys(), residentMLX = UInt64(Memory.activeMemory)
+            err("[pkg-measure] loaded in \(String(format: "%.1f", Date().timeIntervalSince(t0))) s; resident phys \(gb(resident)) GB, MLX active \(gb(residentMLX)) GB")
+            Memory.peakMemory = 0
+            let peak = Peak()
+            let sampler = Thread {
+                while peak.running { peak.value = max(peak.value, phys()); usleep(20_000) }
+            }
+            sampler.start()
+            let t1 = Date()
+            let image: Image
+            if isEdit {
+                guard let inImage, let data = try? Data(contentsOf: inImage), let img = decodeRGB(inImage) else {
+                    err("edit needs a readable input image"); return 3
+                }
+                let req = IEditRequest(
+                    images: [Image(format: .png, data: data, width: img.width, height: img.height)],
+                    prompt: "Make it a snowy winter evening with warm lights in the windows.",
+                    width: mw, height: mh, steps: mSteps, guidanceScale: mGuidance, seed: 7)
+                image = (try await pkg.run(req) as! IEditResponse).image
+            } else {
+                let req = T2IRequest(
+                    prompt: "A red fox sitting in a sunlit birch forest, autumn leaves, photorealistic, 85mm.",
+                    width: mw, height: mh, steps: mSteps, guidanceScale: mGuidance, seed: 7)
+                image = (try await pkg.run(req) as! T2IResponse).image
+            }
+            let wall = Date().timeIntervalSince(t1)
+            peak.running = false
+            usleep(50_000)
+            var usage = rusage_info_v4()
+            let lifetime: UInt64 = withUnsafeMutablePointer(to: &usage) {
+                $0.withMemoryRebound(to: rusage_info_t?.self, capacity: 1) {
+                    proc_pid_rusage(getpid(), RUSAGE_INFO_V4, $0)
+                }
+            } == 0 ? usage.ri_lifetime_max_phys_footprint : 0
+            let peakPhys = max(peak.value, phys(), lifetime), peakMLX = UInt64(Memory.peakMemory)
+            try image.data.write(to: outURL)
+            var spread = 0.0
+            if let px = decodeRGB(outURL) {
+                let n = Double(px.rgb.count)
+                let mean = px.rgb.reduce(0.0) { $0 + Double($1) } / n
+                spread = (px.rgb.reduce(0.0) { $0 + (Double($1) - mean) * (Double($1) - mean) } / n).squareRoot()
+            }
+            print("{\"snapshot\":\"\(URL(fileURLWithPath: snapshotPath).lastPathComponent)\",\"quant\":\"\(quant.rawValue)\","
+                + "\"mode\":\"\(isEdit ? "edit" : "t2i")\",\"width\":\(mw),\"height\":\(mh),\"steps\":\(mSteps),"
+                + "\"resident_phys_gb\":\(gb(resident)),\"resident_mlx_gb\":\(gb(residentMLX)),"
+                + "\"peak_phys_gb\":\(gb(peakPhys)),\"sampled_phys_gb\":\(gb(peak.value)),"
+                + "\"lifetime_phys_gb\":\(gb(lifetime)),\"peak_mlx_gb\":\(gb(peakMLX)),"
+                + "\"activation_phys_gb\":\(gb(peakPhys - min(resident, peakPhys))),"
+                + "\"wall_s\":\(String(format: "%.1f", wall)),\"pixel_std\":\(String(format: "%.1f", spread))}")
+            return spread > 4 ? 0 : 4
+        } catch { err("error: \(error)"); return 3 }
+    }
+
 case "--edit-cond-compare":
     // Compute Swift pos/neg/ref for an image+instruction and compare (shape + cosine + max_abs)
     // against Python's saved py_cond.safetensors. Localizes which conditioning input diverges.

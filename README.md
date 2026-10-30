@@ -21,8 +21,54 @@ conditioner is reused from the
 - **`MLXBoogu`** — the `BooguImagePackage` MLXEngine wrapper (`textToImage` + `imageEdit`).
 
 ```swift
-.package(url: "https://github.com/xocialize/boogu-image-swift", from: "0.1.0")
+.package(url: "https://github.com/xocialize/boogu-image-swift", from: "0.5.0")
 ```
+
+```swift
+import MLXBoogu
+
+// A published tier: the engine materializes the tier repo and the stock conditioner
+// (Qwen/Qwen3-VL-8B-Instruct) into its store, then load() reads them there.
+try await engine.register(BooguImagePackage.registration, configuration: .base(quant: .int4))
+try await engine.register(BooguImagePackage.registration, configuration: .turbo())          // int8, 4 steps, g 1.0
+try await engine.register(BooguImagePackage.registration, configuration: .edit(quant: .bf16))
+// Or local snapshots, read in place (the quant must match the snapshot's DiT, or load() refuses):
+BooguImageConfiguration(snapshotPath: "<Base-bf16>", qwenPath: "<Qwen3-VL-8B-Instruct>", quant: .bf16)
+```
+
+## Tiers (mlx-community)
+
+| | int4 | int8 | bf16 |
+|---|---|---|---|
+| Base (textToImage, 30 steps, CFG 3.5) | `Boogu-Image-0.1-Base-4bit` | `-Base-8bit` | `-Base-bf16` |
+| Turbo (textToImage, 4 steps, g 1.0) | — (quant-sensitive) | `-Turbo-8bit` | `-Turbo-bf16` |
+| Edit (imageEdit, 50 steps, CFG 4.0) | `-Edit-4bit` | `-Edit-8bit` | `-Edit-bf16` |
+
+The int8 Base and Edit tiers are quantized from bf16 in the Turbo-8bit layout (group 32, attn+FFN);
+per-pass DiT cosine vs bf16 0.999897 (Base) and 0.999848 (Edit).
+
+## Memory and size envelope (M5 Max, measured 2026-10-29)
+
+`BooguGate --pkg-measure` drives `load()` + `run()` as a Gaea worker does: Release, MLX pool capped at
+2 GiB, process `phys_footprint` (sampled, and the kernel's lifetime peak). The conditioner is loaded per
+request and evicted before the denoise, so it counts as activation.
+
+| | int4 | int8 | bf16 |
+|---|---|---|---|
+| Resident (DiT + fp32 VAE) | 8.27 GB | 12.89 GB | 20.95 GB |
+| Peak, t2i 1024² | 24.84 GB | 29.46 GB | 37.52 GB |
+| Peak, edit 1024² | 27.08 GB | 31.70 GB | 39.76 GB |
+| Peak, t2i 1536² | 31.61 GB | 36.23 GB | 44.29 GB |
+
+- **Activation is the same on every quant:** 16.6 GB for t2i at 512²–1024² (the conditioner's transient),
+  18.8 GB for edit at 1024², and 23.3 GB for t2i at 1536².
+- **Declared:** resident 8.3 / 12.9 / 21.0 GB. The activation scalar is 19.8 GB (the 1024² case), and an
+  `outputPixels` line of 16.6 GB + 3000 B/px runs up to 1536², so the engine reserves for each job's size.
+- **Envelope:** text-to-image runs 512–2048 px a side and at most 1536² in area. Edit stops at 1024² by
+  area: at 1536² an edit measured 53 GB of activation and 108 s/step. `run()` refuses anything outside
+  (`BooguImagePackage.outputSize`).
+- **Speed:** bf16 is the fastest DiT here. 8 steps at 1024² take 37 s for bf16, against 68 s for int8 and
+  81 s for int4. An edit at 1024² runs 18.6 s/step at bf16 and 32.8 s/step at int4.
 
 ## Parity status
 
@@ -34,8 +80,9 @@ Locked against the Python-MLX port:
 - int4 DiT cos 0.996 (Turbo ships int8 — distilled few-step is quant-sensitive).
 - Both surfaces render coherent, prompt-accurate / structure-preserving images end-to-end.
 
-> **fp32-DiT note:** the bf16 DiT NaNs at large seqLen (≥~512²); set the package's
-> `useFP32DiT` for production resolutions (same fp32-DiT lesson as the Wan/TI2V ports).
+> **bf16 DiT:** the old "bf16 NaNs at ≥~512²" was the mlx-swift NAX split-K GEMM bug (below), fixed
+> in mlx-swift 0.32.3, the manifest floor. bf16 is the default at every size; `useFP32DiT` (or
+> `BOOGU_FP32=1`) is for parity A/Bs only.
 
 ## Gates
 
@@ -45,6 +92,7 @@ from the Python-MLX oracle with `tools/dump_goldens.py`.
 
 ```
 swift run BooguGate --nax-probe                              # mlx-swift NAX split-K GEMM health (no weights)
+swift run -c release BooguGate --pkg-measure <snapshot> <qwenDir> <quant> <t2i|edit> <W> <H> <steps> out.png [in.png] [guidance]
 swift run BooguGate --s0-keys   <baseDir> fixtures           # structural key contract (no weights)
 swift run BooguGate --s1-vae    <baseDir> fixtures/goldens   # VAE decode/encode parity
 swift run BooguGate --s1-sched  <baseDir> fixtures/goldens   # scheduler parity
@@ -55,8 +103,8 @@ swift run BooguGate --e2e       <baseDir> <qwenDir> "<prompt>" out.png [steps] [
 swift run BooguGate --e2e-edit  <editDir> <qwenDir> in.png "<instruction>" out.png [steps] [size] [dtype]
 ```
 
-Weights: `mlx-community/Boogu-Image-0.1-{Base,Turbo,Edit}` (transformer / vae / scheduler)
-+ the stock `mlx-community/Qwen3-VL-8B-Instruct` conditioner. This repo contains no weights.
+Weights: the `mlx-community/Boogu-Image-0.1-*` tiers above (transformer / vae / scheduler)
++ the stock `Qwen/Qwen3-VL-8B-Instruct` conditioner. This repo contains no weights.
 
 ### mlx-swift NAX split-K GEMM (fixed)
 
